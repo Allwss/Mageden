@@ -122,6 +122,28 @@ async function getWalletTokens(walletAddress) {
   }
 }
 
+// دالة جديدة للحصول على cNFTs
+async function getWalletCNFTs(walletAddress) {
+  try {
+    const url = `${MAGIC_EDEN_BASE_URL}/wallets/${walletAddress}/tokens?compressed=true`;
+    const response = await fetch(url, {
+      headers: { Authorization: `Bearer ${MAGIC_EDEN_API_KEY}` },
+    });
+    
+    if (!response.ok) {
+      console.log(`   ❌ cNFTs API Error: ${response.status}`);
+      return [];
+    }
+    
+    const data = await response.json();
+    console.log(`   ✅ cNFTs Found: ${Array.isArray(data) ? data.length : 0}`);
+    return Array.isArray(data) ? data : [];
+  } catch (e) {
+    console.log(`   ❌ cNFTs Exception: ${e.message}`);
+    return [];
+  }
+}
+
 async function getEscrowBalance(walletAddress) {
   try {
     const url = `${MAGIC_EDEN_BASE_URL}/wallets/${walletAddress}/escrow_balance`;
@@ -295,6 +317,21 @@ function findListedTokens(tokens) {
   );
 }
 
+// دالة جديدة للبحث عن cNFTs المعروضة
+function findListedCNFTs(cnfts) {
+  if (!Array.isArray(cnfts)) return [];
+  
+  return cnfts.filter(cnft => 
+    cnft && (
+      cnft.listStatus === 'listed' ||
+      cnft.listed === true ||
+      cnft.onMarket === true ||
+      (cnft.price && cnft.price > 0) ||
+      (cnft.listPrice && cnft.listPrice > 0)
+    )
+  );
+}
+
 // دالة لحساب إجمالي قيمة العروض
 function calculateOffersTotal(offers) {
   if (!Array.isArray(offers)) return 0;
@@ -309,9 +346,10 @@ async function checkWallet(walletAddress) {
   try {
     console.log(`\n🔍 Starting comprehensive check for: ${walletAddress}`);
     
-    const [activity, tokens, escrowBalance, offersMade, offersReceived] = await Promise.all([
+    const [activity, tokens, cnfts, escrowBalance, offersMade, offersReceived] = await Promise.all([
       getWalletActivity(walletAddress),
       getWalletTokens(walletAddress),
+      getWalletCNFTs(walletAddress),
       getEscrowBalance(walletAddress),
       getOffersMade(walletAddress),
       getOffersReceived(walletAddress)
@@ -319,7 +357,8 @@ async function checkWallet(walletAddress) {
     
     const { hasTrading, recentActivity, count: tradingCount } = analyzeTradingActivity(activity);
     const listedTokens = findListedTokens(tokens);
-    const hasListed = listedTokens.length > 0;
+    const listedCNFTs = findListedCNFTs(cnfts);
+    const hasListed = listedTokens.length > 0 || listedCNFTs.length > 0;
     const hasOffersMade = Array.isArray(offersMade) && offersMade.length > 0;
     const hasOffersReceived = Array.isArray(offersReceived) && offersReceived.length > 0;
 
@@ -329,7 +368,8 @@ async function checkWallet(walletAddress) {
 
     console.log(`✅ Final Results for ${walletAddress}:`);
     console.log(`   - Trading: ${tradingCount} activities`);
-    console.log(`   - Listed: ${listedTokens.length} NFTs`);
+    console.log(`   - Regular NFTs Listed: ${listedTokens.length}`);
+    console.log(`   - cNFTs Listed: ${listedCNFTs.length}`);
     console.log(`   - Escrow: ${escrowBalance} SOL`);
     console.log(`   - Offers Made: ${offersMade.length} (${offersMadeTotal} SOL)`);
     console.log(`   - Offers Received: ${offersReceived.length} (${offersReceivedTotal} SOL)`);
@@ -338,6 +378,7 @@ async function checkWallet(walletAddress) {
       address: walletAddress,
       activity: activity || [],
       tokens: tokens || [],
+      cnfts: cnfts || [],
       escrowBalance: escrowBalance || 0,
       offersMade: offersMade || [],
       offersReceived: offersReceived || [],
@@ -345,8 +386,9 @@ async function checkWallet(walletAddress) {
       tradingCount,
       recentActivity: recentActivity || [],
       hasListed,
-      listedCount: listedTokens.length,
+      listedCount: listedTokens.length + listedCNFTs.length,
       listedTokens: listedTokens,
+      listedCNFTs: listedCNFTs,
       hasOffersMade,
       offersMadeCount: hasOffersMade ? offersMade.length : 0,
       offersMadeTotal: offersMadeTotal,
@@ -377,6 +419,7 @@ function generateMarkdownResult(walletInfo) {
     offersReceivedTotal,
     recentActivity,
     listedTokens,
+    listedCNFTs,
     offersMade,
     offersReceived
   } = walletInfo;
@@ -410,12 +453,23 @@ function generateMarkdownResult(walletInfo) {
     message += `\n`;
   }
   
-  // NFTs المعروضة إذا وجدت - عرض جميعها
+  // NFTs العادية المعروضة إذا وجدت
   if (listedTokens.length > 0) {
-    message += `🖼️ *NFTs المعروضة (${listedCount}):*\n`;
+    message += `🖼️ *NFTs العادية المعروضة (${listedTokens.length}):*\n`;
     listedTokens.forEach((nft, i) => {
       const name = nft.name || nft.title || 'Unknown';
       const price = nft.price || nft.listPrice || 'N/A';
+      message += `${i + 1}. ${name} - ${price} SOL\n`;
+    });
+    message += `\n`;
+  }
+  
+  // cNFTs المعروضة إذا وجدت
+  if (listedCNFTs.length > 0) {
+    message += `🗜️ *cNFTs المضغوطة المعروضة (${listedCNFTs.length}):*\n`;
+    listedCNFTs.forEach((cnft, i) => {
+      const name = cnft.name || cnft.title || 'Unknown cNFT';
+      const price = cnft.price || cnft.listPrice || 'N/A';
       message += `${i + 1}. ${name} - ${price} SOL\n`;
     });
     message += `\n`;
@@ -474,7 +528,8 @@ bot.on('message', async (msg) => {
 
 *🔍 ما يتم فحصه:*
 ✅ نشاط البيع والشراء
-✅ NFTs المعروضة للبيع (النشطة فقط)  
+✅ NFTs العادية المعروضة للبيع
+✅ cNFTs المضغوطة المعروضة للبيع  
 ✅ رصيد الضمان (Escrow)
 ✅ العروض المقدمة والمستلمة (النشطة فقط) مع قيمها
 
@@ -553,7 +608,7 @@ bot.on('message', async (msg) => {
           const result = await checkWallet(wallet.address);
           
           resultsMessage += `📍 *المحفظة ${i + 1}:* \`${wallet.address.substring(0, 12)}...\`\n`;
-          resultsMessage += `🔄 تداول: ${result.tradingCount} | 🖼️ معروض: ${result.listedCount} | 💰 ضمان: ${result.escrowBalance} SOL\n`;
+          resultsMessage += `🔄 تداول: ${result.tradingCount} | 🖼️ عادي: ${result.listedTokens.length} | 🗜️ مضغوط: ${result.listedCNFTs.length} | 💰 ضمان: ${result.escrowBalance} SOL\n`;
           resultsMessage += `📤 عروض: ${result.offersMadeCount} (${result.offersMadeTotal.toFixed(2)} SOL) | 📥 مستلم: ${result.offersReceivedCount} (${result.offersReceivedTotal.toFixed(2)} SOL)\n\n`;
           
           // تأخير بين الطلبات
@@ -634,7 +689,7 @@ app.get('/', (req, res) => {
             <h1>🤖 بوت فحص محافظ Magic Eden</h1>
             <p class="status">✅ البوت يعمل بشكل طبيعي</p>
             <p>استخدم بوت التلجرام لفحص محافظك</p>
-            <p>📊 يتم فحص: نشاط التداول - NFTs المعروضة - رصيد الضمان - العروض النشطة</p>
+            <p>📊 يتم فحص: نشاط التداول - NFTs العادية - cNFTs المضغوطة - رصيد الضمان - العروض النشطة</p>
             <hr>
             <p>⚡ Powered by Magic Eden API</p>
         </div>
