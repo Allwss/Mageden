@@ -98,6 +98,119 @@ function validateInput(input) {
   return null;
 }
 
+async function getWalletActivity(walletAddress) {
+  try {
+    const url = `${MAGIC_EDEN_BASE_URL}/wallets/${walletAddress}/activities?offset=0&limit=20`;
+    const response = await fetch(url, {
+      headers: { Authorization: `Bearer ${MAGIC_EDEN_API_KEY}` },
+    });
+    return response.ok ? await response.json() : [];
+  } catch (e) {
+    return [];
+  }
+}
+
+async function getWalletTokens(walletAddress) {
+  try {
+    const url = `${MAGIC_EDEN_BASE_URL}/wallets/${walletAddress}/tokens`;
+    const response = await fetch(url, {
+      headers: { Authorization: `Bearer ${MAGIC_EDEN_API_KEY}` },
+    });
+    return response.ok ? await response.json() : [];
+  } catch (e) {
+    return [];
+  }
+}
+
+// دالة جديدة للحصول على cNFTs
+async function getWalletCNFTs(walletAddress) {
+  try {
+    const url = `${MAGIC_EDEN_BASE_URL}/wallets/${walletAddress}/tokens?compressed=true`;
+    const response = await fetch(url, {
+      headers: { Authorization: `Bearer ${MAGIC_EDEN_API_KEY}` },
+    });
+    
+    if (!response.ok) return [];
+    
+    const data = await response.json();
+    return Array.isArray(data) ? data : [];
+  } catch (e) {
+    return [];
+  }
+}
+
+// إرجاع دالة رصيد الضمان إلى النسخة الأصلية التي كانت تعمل
+async function getEscrowBalance(walletAddress) {
+  try {
+    const url = `${MAGIC_EDEN_BASE_URL}/wallets/${walletAddress}/escrow_balance`;
+    const response = await fetch(url, {
+      headers: { Authorization: `Bearer ${MAGIC_EDEN_API_KEY}` }
+    });
+    
+    if (!response.ok) return 0;
+    
+    const data = await response.json();
+    
+    // معالجة مختلف أشكال البيانات التي قد تأتي من API
+    if (typeof data === "number") return data;
+    if (data && (data.sol !== undefined)) return Number(data.sol) || 0;
+    if (data && (data.amount !== undefined)) return Number(data.amount) || 0;
+    
+    return 0;
+  } catch {
+    return 0;
+  }
+}
+
+// الاستعلامات للعروض النشطة
+async function getOffersMade(walletAddress) {
+  try {
+    const url = `${MAGIC_EDEN_BASE_URL}/wallets/${walletAddress}/offers_made`;
+    const response = await fetch(url, {
+      headers: { Authorization: `Bearer ${MAGIC_EDEN_API_KEY}` },
+    });
+    
+    if (!response.ok) return [];
+    
+    const allOffers = await response.json();
+    
+    // تصفية العروض النشطة فقط
+    const activeOffers = allOffers.filter(offer => 
+      offer && 
+      !offer.cancelledAt &&
+      (!offer.expiresAt || new Date(offer.expiresAt) > new Date())
+    );
+    
+    return activeOffers;
+  } catch (e) {
+    return [];
+  }
+}
+
+async function getOffersReceived(walletAddress) {
+  try {
+    const url = `${MAGIC_EDEN_BASE_URL}/wallets/${walletAddress}/offers_received`;
+    const response = await fetch(url, {
+      headers: { Authorization: `Bearer ${MAGIC_EDEN_API_KEY}` },
+    });
+    
+    if (!response.ok) return [];
+    
+    const allOffers = await response.json();
+    
+    // تصفية العروض النشطة فقط
+    const activeOffers = allOffers.filter(offer => 
+      offer && 
+      !offer.cancelledAt &&
+      (!offer.expiresAt || new Date(offer.expiresAt) > new Date())
+    );
+    
+    return activeOffers;
+  } catch (e) {
+    return [];
+  }
+}
+
 // استخدام API الـ activities لاكتشاف الـ NFTs المعروضة (مثل الكود القديم)
 async function getWalletListedNFTs(walletAddress) {
   try {
@@ -145,7 +258,7 @@ async function verifyNFTsOwnership(walletAddress, listedActivities) {
         if (tokenData.owner === walletAddress) {
           verifiedNFTs.push({
             name: tokenData.name || 'Unknown',
-            price: activity.price || tokenData.price || '?',
+            price: activity.price || tokenData.price || 'N/A',
             tokenMint: activity.tokenMint,
             collection: tokenData.collection || 'Unknown',
             owner: tokenData.owner
@@ -158,83 +271,6 @@ async function verifyNFTsOwnership(walletAddress, listedActivities) {
   }
 
   return verifiedNFTs;
-}
-
-async function getWalletTokens(walletAddress) {
-  try {
-    const url = `${MAGIC_EDEN_BASE_URL}/wallets/${walletAddress}/tokens`;
-    const response = await fetch(url, {
-      headers: { Authorization: `Bearer ${MAGIC_EDEN_API_KEY}` },
-    });
-    return response.ok ? await response.json() : [];
-  } catch (e) {
-    return [];
-  }
-}
-
-async function getEscrowBalance(walletAddress) {
-  try {
-    const url = `${MAGIC_EDEN_BASE_URL}/wallets/${walletAddress}/escrow_balance`;
-    const response = await fetch(url, {
-      headers: { Authorization: `Bearer ${MAGIC_EDEN_API_KEY}` }
-    });
-    if (!response.ok) return 0;
-    const data = await response.json();
-    
-    if (typeof data === "number") return data;
-    if (data && data.sol !== undefined) return Number(data.sol) || 0;
-    if (data && data.amount !== undefined) return Number(data.amount) || 0;
-    return 0;
-  } catch {
-    return 0;
-  }
-}
-
-// الاستعلامات للعروض
-async function getOffersMade(walletAddress) {
-  try {
-    const url = `${MAGIC_EDEN_BASE_URL}/wallets/${walletAddress}/offers_made`;
-    const response = await fetch(url, {
-      headers: { Authorization: `Bearer ${MAGIC_EDEN_API_KEY}` },
-    });
-    
-    if (!response.ok) return [];
-    
-    const allOffers = await response.json();
-    
-    const activeOffers = allOffers.filter(offer => 
-      offer && 
-      !offer.cancelledAt &&
-      (!offer.expiresAt || new Date(offer.expiresAt) > new Date())
-    );
-    
-    return activeOffers;
-  } catch (e) {
-    return [];
-  }
-}
-
-async function getOffersReceived(walletAddress) {
-  try {
-    const url = `${MAGIC_EDEN_BASE_URL}/wallets/${walletAddress}/offers_received`;
-    const response = await fetch(url, {
-      headers: { Authorization: `Bearer ${MAGIC_EDEN_API_KEY}` },
-    });
-    
-    if (!response.ok) return [];
-    
-    const allOffers = await response.json();
-    
-    const activeOffers = allOffers.filter(offer => 
-      offer && 
-      !offer.cancelledAt &&
-      (!offer.expiresAt || new Date(offer.expiresAt) > new Date())
-    );
-    
-    return activeOffers;
-  } catch (e) {
-    return [];
-  }
 }
 
 function analyzeTradingActivity(activity) {
@@ -252,6 +288,35 @@ function analyzeTradingActivity(activity) {
   return { hasTrading, recentActivity, count: tradingActivities.length };
 }
 
+function findListedTokens(tokens) {
+  if (!Array.isArray(tokens)) return [];
+  
+  return tokens.filter(token => 
+    token && (
+      token.listStatus === 'listed' ||
+      token.listed === true ||
+      token.onMarket === true ||
+      (token.price && token.price > 0) ||
+      (token.listPrice && token.listPrice > 0)
+    )
+  );
+}
+
+// دالة جديدة للبحث عن cNFTs المعروضة
+function findListedCNFTs(cnfts) {
+  if (!Array.isArray(cnfts)) return [];
+  
+  return cnfts.filter(cnft => 
+    cnft && (
+      cnft.listStatus === 'listed' ||
+      cnft.listed === true ||
+      cnft.onMarket === true ||
+      (cnft.price && cnft.price > 0) ||
+      (cnft.listPrice && cnft.listPrice > 0)
+    )
+  );
+}
+
 // دالة لحساب إجمالي قيمة العروض
 function calculateOffersTotal(offers) {
   if (!Array.isArray(offers)) return 0;
@@ -264,10 +329,11 @@ function calculateOffersTotal(offers) {
 
 async function checkWallet(walletAddress) {
   try {
-    const [activity, tokens, escrowBalance, offersMade, offersReceived, listedActivities] = await Promise.all([
+    const [activity, tokens, cnfts, escrowBalance, offersMade, offersReceived, listedActivities] = await Promise.all([
       getWalletActivity(walletAddress),
       getWalletTokens(walletAddress),
-      getEscrowBalance(walletAddress),
+      getWalletCNFTs(walletAddress),
+      getEscrowBalance(walletAddress), // العودة إلى الدالة الأصلية
       getOffersMade(walletAddress),
       getOffersReceived(walletAddress),
       getWalletListedNFTs(walletAddress)
@@ -277,7 +343,52 @@ async function checkWallet(walletAddress) {
     const verifiedListedNFTs = await verifyNFTsOwnership(walletAddress, listedActivities);
     
     const { hasTrading, recentActivity, count: tradingCount } = analyzeTradingActivity(activity);
-    const hasListed = verifiedListedNFTs.length > 0;
+    const listedTokens = findListedTokens(tokens);
+    const listedCNFTs = findListedCNFTs(cnfts);
+    
+    // دمج القوائم وإزالة التكرارات باستخدام tokenMint كمفتاح
+    const allListedNFTs = [];
+    const seenMints = new Set();
+    
+    // إضافة NFTs من طريقة الأنشطة (الكود القديم)
+    verifiedListedNFTs.forEach(nft => {
+      if (!seenMints.has(nft.tokenMint)) {
+        seenMints.add(nft.tokenMint);
+        allListedNFTs.push({...nft, source: 'activities'});
+      }
+    });
+    
+    // إضافة NFTs من tokens العادية
+    listedTokens.forEach(token => {
+      if (token.mint && !seenMints.has(token.mint)) {
+        seenMints.add(token.mint);
+        allListedNFTs.push({
+          name: token.name || token.title || 'Unknown',
+          price: token.price || token.listPrice || 'N/A',
+          tokenMint: token.mint,
+          collection: token.collection || 'Unknown',
+          owner: walletAddress,
+          source: 'tokens'
+        });
+      }
+    });
+    
+    // إضافة cNFTs
+    listedCNFTs.forEach(cnft => {
+      if (cnft.mint && !seenMints.has(cnft.mint)) {
+        seenMints.add(cnft.mint);
+        allListedNFTs.push({
+          name: cnft.name || cnft.title || 'Unknown cNFT',
+          price: cnft.price || cnft.listPrice || 'N/A',
+          tokenMint: cnft.mint,
+          collection: cnft.collection || 'Unknown',
+          owner: walletAddress,
+          source: 'cnfts'
+        });
+      }
+    });
+    
+    const hasListed = allListedNFTs.length > 0;
     const hasOffersMade = Array.isArray(offersMade) && offersMade.length > 0;
     const hasOffersReceived = Array.isArray(offersReceived) && offersReceived.length > 0;
 
@@ -289,15 +400,16 @@ async function checkWallet(walletAddress) {
       address: walletAddress,
       activity: activity || [],
       tokens: tokens || [],
+      cnfts: cnfts || [],
       escrowBalance: escrowBalance || 0,
       offersMade: offersMade || [],
       offersReceived: offersReceived || [],
-      listedNFTs: verifiedListedNFTs,
+      listedNFTs: allListedNFTs,
       hasTrading,
       tradingCount,
       recentActivity: recentActivity || [],
       hasListed,
-      listedCount: verifiedListedNFTs.length,
+      listedCount: allListedNFTs.length,
       hasOffersMade,
       offersMadeCount: hasOffersMade ? offersMade.length : 0,
       offersMadeTotal: offersMadeTotal,
@@ -307,18 +419,6 @@ async function checkWallet(walletAddress) {
     };
   } catch (e) {
     throw new Error(`فشل في فحص المحفظة: ${e.message}`);
-  }
-}
-
-async function getWalletActivity(walletAddress) {
-  try {
-    const url = `${MAGIC_EDEN_BASE_URL}/wallets/${walletAddress}/activities?offset=0&limit=20`;
-    const response = await fetch(url, {
-      headers: { Authorization: `Bearer ${MAGIC_EDEN_API_KEY}` },
-    });
-    return response.ok ? await response.json() : [];
-  } catch (e) {
-    return [];
   }
 }
 
