@@ -1,0 +1,36 @@
+{
+  "name": "magiceden-wallet-checker-bot",
+  "version": "1.0.0",
+  "description": "Telegram bot for checking Magic Eden wallet activity, listed NFTs, and offers",
+  "main": "bot.js",
+  "type": "module",
+  "scripts": {
+    "start": "node bot.js",
+    "dev": "node --watch bot.js",
+    "test": "echo \"No tests specified\" && exit 0"
+  },
+  "keywords": [
+    "telegram",
+    "bot",
+    "solana",
+    "magiceden",
+    "nft",
+    "wallet",
+    "crypto"
+  ],
+  "author": "Your Name",
+  "license": "MIT",
+  "dependencies": {
+    "@solana/web3.js": "^1.87.6",
+    "bs58": "^5.0.0",
+    "express": "^4.18.2",
+    "node-telegram-bot-api": "^0.64.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/your-username/magiceden-wallet-checker-bot"
+  }
+}
