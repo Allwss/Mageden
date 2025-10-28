@@ -125,20 +125,53 @@ async function getWalletTokens(walletAddress) {
 async function getEscrowBalance(walletAddress) {
   try {
     const url = `${MAGIC_EDEN_BASE_URL}/wallets/${walletAddress}/escrow_balance`;
+    console.log(`   🔍 Fetching escrow: ${url}`);
+    
     const response = await fetch(url, {
       headers: { Authorization: `Bearer ${MAGIC_EDEN_API_KEY}` }
     });
+    
     if (!response.ok) {
-      console.log(`   ❌ Escrow Error: ${response.status} for ${walletAddress}`);
+      console.log(`   ❌ Escrow API Error: ${response.status} - ${response.statusText}`);
       return 0;
     }
-    const data = await response.json();
-    console.log(`   ✅ Escrow Raw Data:`, JSON.stringify(data).substring(0, 200));
     
-    if (typeof data === "number") return data;
-    if (data && data.sol !== undefined) return Number(data.sol) || 0;
-    if (data && data.amount !== undefined) return Number(data.amount) || 0;
-    return 0;
+    const data = await response.json();
+    console.log(`   ✅ Escrow Raw Response:`, JSON.stringify(data));
+    
+    // معالجة مختلف أشكال البيانات التي قد تأتي من API
+    let balance = 0;
+    
+    if (typeof data === 'number') {
+      balance = data;
+    } else if (typeof data === 'object' && data !== null) {
+      // البحث عن قيمة SOL في أي من الحقول المحتملة
+      if (data.sol !== undefined) balance = Number(data.sol);
+      else if (data.amount !== undefined) balance = Number(data.amount);
+      else if (data.balance !== undefined) balance = Number(data.balance);
+      else if (data.escrowBalance !== undefined) balance = Number(data.escrowBalance);
+      else if (data.total !== undefined) balance = Number(data.total);
+      
+      // إذا لم نجد في الحقول الشائعة، نبحث في جميع الحروف
+      if (balance === 0) {
+        for (let key in data) {
+          if (typeof data[key] === 'number' && data[key] > 0) {
+            console.log(`   🔍 Found potential balance in field ${key}: ${data[key]}`);
+            balance = data[key];
+            break;
+          }
+        }
+      }
+    }
+    
+    // تحويل من لامبو إلى SOL إذا كان الرقم كبير (لامبو = 1,000,000,000 لكل SOL)
+    if (balance > 1000000) {
+      balance = balance / 1000000000;
+      console.log(`   🔄 Converted from lamports: ${balance} SOL`);
+    }
+    
+    console.log(`   ✅ Final Escrow Balance: ${balance} SOL`);
+    return balance;
   } catch (e) {
     console.log(`   ❌ Escrow Exception: ${e.message}`);
     return 0;
