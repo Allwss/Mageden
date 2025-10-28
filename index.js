@@ -122,24 +122,7 @@ async function getWalletTokens(walletAddress) {
   }
 }
 
-// دالة جديدة للحصول على cNFTs
-async function getWalletCNFTs(walletAddress) {
-  try {
-    const url = `${MAGIC_EDEN_BASE_URL}/wallets/${walletAddress}/tokens?compressed=true`;
-    const response = await fetch(url, {
-      headers: { Authorization: `Bearer ${MAGIC_EDEN_API_KEY}` },
-    });
-    
-    if (!response.ok) return [];
-    
-    const data = await response.json();
-    return Array.isArray(data) ? data : [];
-  } catch (e) {
-    return [];
-  }
-}
-
-// إرجاع دالة رصيد الضمان إلى النسخة الأصلية التي كانت تعمل
+// دالة رصيد الضمان الأصلية التي كانت تعمل
 async function getEscrowBalance(walletAddress) {
   try {
     const url = `${MAGIC_EDEN_BASE_URL}/wallets/${walletAddress}/escrow_balance`;
@@ -151,13 +134,25 @@ async function getEscrowBalance(walletAddress) {
     
     const data = await response.json();
     
-    // معالجة مختلف أشكال البيانات التي قد تأتي من API
-    if (typeof data === "number") return data;
-    if (data && (data.sol !== undefined)) return Number(data.sol) || 0;
-    if (data && (data.amount !== undefined)) return Number(data.amount) || 0;
+    // استخراج الرصيد من الحقول المحتملة
+    let balance = 0;
     
-    return 0;
-  } catch {
+    if (typeof data === "number") {
+      balance = data;
+    } else if (data && typeof data === "object") {
+      // البحث في الحقول المختلفة للرصيد
+      if (data.sol !== undefined) balance = Number(data.sol);
+      else if (data.amount !== undefined) balance = Number(data.amount);
+      else if (data.balance !== undefined) balance = Number(data.balance);
+    }
+    
+    // إذا كان الرصيد كبير (لامبو) نحوله إلى SOL
+    if (balance > 1000000) {
+      balance = balance / 1000000000; // تحويل من لامبو إلى SOL
+    }
+    
+    return balance;
+  } catch (e) {
     return 0;
   }
 }
@@ -288,35 +283,6 @@ function analyzeTradingActivity(activity) {
   return { hasTrading, recentActivity, count: tradingActivities.length };
 }
 
-function findListedTokens(tokens) {
-  if (!Array.isArray(tokens)) return [];
-  
-  return tokens.filter(token => 
-    token && (
-      token.listStatus === 'listed' ||
-      token.listed === true ||
-      token.onMarket === true ||
-      (token.price && token.price > 0) ||
-      (token.listPrice && token.listPrice > 0)
-    )
-  );
-}
-
-// دالة جديدة للبحث عن cNFTs المعروضة
-function findListedCNFTs(cnfts) {
-  if (!Array.isArray(cnfts)) return [];
-  
-  return cnfts.filter(cnft => 
-    cnft && (
-      cnft.listStatus === 'listed' ||
-      cnft.listed === true ||
-      cnft.onMarket === true ||
-      (cnft.price && cnft.price > 0) ||
-      (cnft.listPrice && cnft.listPrice > 0)
-    )
-  );
-}
-
 // دالة لحساب إجمالي قيمة العروض
 function calculateOffersTotal(offers) {
   if (!Array.isArray(offers)) return 0;
@@ -329,11 +295,10 @@ function calculateOffersTotal(offers) {
 
 async function checkWallet(walletAddress) {
   try {
-    const [activity, tokens, cnfts, escrowBalance, offersMade, offersReceived, listedActivities] = await Promise.all([
+    const [activity, tokens, escrowBalance, offersMade, offersReceived, listedActivities] = await Promise.all([
       getWalletActivity(walletAddress),
       getWalletTokens(walletAddress),
-      getWalletCNFTs(walletAddress),
-      getEscrowBalance(walletAddress), // العودة إلى الدالة الأصلية
+      getEscrowBalance(walletAddress), // استخدام الدالة الأصلية
       getOffersMade(walletAddress),
       getOffersReceived(walletAddress),
       getWalletListedNFTs(walletAddress)
@@ -343,52 +308,7 @@ async function checkWallet(walletAddress) {
     const verifiedListedNFTs = await verifyNFTsOwnership(walletAddress, listedActivities);
     
     const { hasTrading, recentActivity, count: tradingCount } = analyzeTradingActivity(activity);
-    const listedTokens = findListedTokens(tokens);
-    const listedCNFTs = findListedCNFTs(cnfts);
-    
-    // دمج القوائم وإزالة التكرارات باستخدام tokenMint كمفتاح
-    const allListedNFTs = [];
-    const seenMints = new Set();
-    
-    // إضافة NFTs من طريقة الأنشطة (الكود القديم)
-    verifiedListedNFTs.forEach(nft => {
-      if (!seenMints.has(nft.tokenMint)) {
-        seenMints.add(nft.tokenMint);
-        allListedNFTs.push({...nft, source: 'activities'});
-      }
-    });
-    
-    // إضافة NFTs من tokens العادية
-    listedTokens.forEach(token => {
-      if (token.mint && !seenMints.has(token.mint)) {
-        seenMints.add(token.mint);
-        allListedNFTs.push({
-          name: token.name || token.title || 'Unknown',
-          price: token.price || token.listPrice || 'N/A',
-          tokenMint: token.mint,
-          collection: token.collection || 'Unknown',
-          owner: walletAddress,
-          source: 'tokens'
-        });
-      }
-    });
-    
-    // إضافة cNFTs
-    listedCNFTs.forEach(cnft => {
-      if (cnft.mint && !seenMints.has(cnft.mint)) {
-        seenMints.add(cnft.mint);
-        allListedNFTs.push({
-          name: cnft.name || cnft.title || 'Unknown cNFT',
-          price: cnft.price || cnft.listPrice || 'N/A',
-          tokenMint: cnft.mint,
-          collection: cnft.collection || 'Unknown',
-          owner: walletAddress,
-          source: 'cnfts'
-        });
-      }
-    });
-    
-    const hasListed = allListedNFTs.length > 0;
+    const hasListed = verifiedListedNFTs.length > 0;
     const hasOffersMade = Array.isArray(offersMade) && offersMade.length > 0;
     const hasOffersReceived = Array.isArray(offersReceived) && offersReceived.length > 0;
 
@@ -400,16 +320,15 @@ async function checkWallet(walletAddress) {
       address: walletAddress,
       activity: activity || [],
       tokens: tokens || [],
-      cnfts: cnfts || [],
       escrowBalance: escrowBalance || 0,
       offersMade: offersMade || [],
       offersReceived: offersReceived || [],
-      listedNFTs: allListedNFTs,
+      listedNFTs: verifiedListedNFTs,
       hasTrading,
       tradingCount,
       recentActivity: recentActivity || [],
       hasListed,
-      listedCount: allListedNFTs.length,
+      listedCount: verifiedListedNFTs.length,
       hasOffersMade,
       offersMadeCount: hasOffersMade ? offersMade.length : 0,
       offersMadeTotal: offersMadeTotal,
