@@ -27,15 +27,15 @@ async function sleep(ms) {
 function extractWalletsFromText(text) {
   const lines = text.split('\n');
   const wallets = [];
-
+  
   lines.forEach(line => {
     const trimmedLine = line.trim();
     if (!trimmedLine) return;
-
+    
     // البحث عن عناوين Solana (32-44 حرف)
     const solanaAddressRegex = /[1-9A-HJ-NP-Za-km-z]{32,44}/g;
     const addresses = trimmedLine.match(solanaAddressRegex);
-
+    
     if (addresses) {
       addresses.forEach(address => {
         if (address.length >= 32 && address.length <= 44) {
@@ -48,7 +48,7 @@ function extractWalletsFromText(text) {
         }
       });
     }
-
+    
     // البحث عن مفاتيح خاصة base58
     try {
       const secretKey = bs58.decode(trimmedLine);
@@ -65,14 +65,14 @@ function extractWalletsFromText(text) {
       // ليس مفتاح خاص صالح
     }
   });
-
+  
   return wallets;
 }
 
 function validateInput(input) {
   const trimmedInput = input.trim();
   if (!trimmedInput) return null;
-
+  
   try {
     const secretKey = bs58.decode(trimmedInput);
     if (secretKey.length === 64) {
@@ -85,7 +85,7 @@ function validateInput(input) {
       };
     }
   } catch (error) {}
-
+  
   if (trimmedInput.length >= 32 && trimmedInput.length <= 44) {
     return {
       address: trimmedInput,
@@ -94,7 +94,7 @@ function validateInput(input) {
       source: 'address'
     };
   }
-
+  
   return null;
 }
 
@@ -128,36 +128,66 @@ async function getEscrowBalance(walletAddress) {
     const response = await fetch(url, {
       headers: { Authorization: `Bearer ${MAGIC_EDEN_API_KEY}` }
     });
-    if (!response.ok) return 0;
+    if (!response.ok) {
+      console.log(`   ❌ Escrow Error: ${response.status} for ${walletAddress}`);
+      return 0;
+    }
     const data = await response.json();
-    return typeof data === "number" ? data : (data?.sol || 0);
-  } catch {
+    console.log(`   ✅ Escrow Raw Data:`, JSON.stringify(data).substring(0, 200));
+    
+    if (typeof data === "number") return data;
+    if (data && data.sol !== undefined) return Number(data.sol) || 0;
+    if (data && data.amount !== undefined) return Number(data.amount) || 0;
+    return 0;
+  } catch (e) {
+    console.log(`   ❌ Escrow Exception: ${e.message}`);
     return 0;
   }
 }
 
-// الاستعلامات الجديدة مع تصفية العروض النشطة فقط
+// الاستعلامات الجديدة مع تصفية أقل صرامة للعروض النشطة
 async function getOffersMade(walletAddress) {
   try {
     const url = `${MAGIC_EDEN_BASE_URL}/wallets/${walletAddress}/offers_made`;
+    console.log(`   🔍 Fetching offers made: ${url}`);
+    
     const response = await fetch(url, {
       headers: { Authorization: `Bearer ${MAGIC_EDEN_API_KEY}` },
     });
-
-    if (!response.ok) return [];
-
+    
+    if (!response.ok) {
+      console.log(`   ❌ Offers Made API Error: ${response.status}`);
+      return [];
+    }
+    
     const allOffers = await response.json();
-
-    // تصفية العروض النشطة فقط
-    const activeOffers = allOffers.filter(offer => 
-      offer && 
-      offer.status === 'active' && // العروض النشطة فقط
-      !offer.cancelledAt && // لم يتم إلغاؤها
-      (!offer.expiresAt || new Date(offer.expiresAt) > new Date()) // لم تنته صلاحيتها
-    );
-
+    console.log(`   ✅ Offers Made Raw: ${allOffers.length} offers found`);
+    
+    if (allOffers.length > 0) {
+      console.log(`   📋 Sample offer:`, JSON.stringify(allOffers[0]).substring(0, 300));
+    }
+    
+    // تصفية أقل صرامة - نأخذ جميع العروض أولاً ثم نرى البيانات
+    const activeOffers = allOffers.filter(offer => {
+      if (!offer) return false;
+      
+      // إذا كان هناك حقل cancelledAt أو expiredAt، نتأكد من أنه غير ملغى/منتهي
+      if (offer.cancelledAt && offer.cancelledAt !== null) return false;
+      if (offer.expiredAt && new Date(offer.expiredAt) <= new Date()) return false;
+      
+      // إذا كان هناك حقل status، نتحقق منه
+      if (offer.status) {
+        const status = offer.status.toLowerCase();
+        if (status === 'cancelled' || status === 'expired' || status === 'rejected') return false;
+      }
+      
+      return true;
+    });
+    
+    console.log(`   ✅ Active Offers: ${activeOffers.length} after filtering`);
     return activeOffers;
   } catch (e) {
+    console.log(`   ❌ Offers Made Exception: ${e.message}`);
     return [];
   }
 }
@@ -165,24 +195,39 @@ async function getOffersMade(walletAddress) {
 async function getOffersReceived(walletAddress) {
   try {
     const url = `${MAGIC_EDEN_BASE_URL}/wallets/${walletAddress}/offers_received`;
+    console.log(`   🔍 Fetching offers received: ${url}`);
+    
     const response = await fetch(url, {
       headers: { Authorization: `Bearer ${MAGIC_EDEN_API_KEY}` },
     });
-
-    if (!response.ok) return [];
-
+    
+    if (!response.ok) {
+      console.log(`   ❌ Offers Received API Error: ${response.status}`);
+      return [];
+    }
+    
     const allOffers = await response.json();
-
-    // تصفية العروض النشطة فقط
-    const activeOffers = allOffers.filter(offer => 
-      offer && 
-      offer.status === 'active' && // العروض النشطة فقط
-      !offer.cancelledAt && // لم يتم إلغاؤها
-      (!offer.expiresAt || new Date(offer.expiresAt) > new Date()) // لم تنته صلاحيتها
-    );
-
+    console.log(`   ✅ Offers Received Raw: ${allOffers.length} offers found`);
+    
+    // نفس التصفية المستخدمة في العروض المقدمة
+    const activeOffers = allOffers.filter(offer => {
+      if (!offer) return false;
+      
+      if (offer.cancelledAt && offer.cancelledAt !== null) return false;
+      if (offer.expiredAt && new Date(offer.expiredAt) <= new Date()) return false;
+      
+      if (offer.status) {
+        const status = offer.status.toLowerCase();
+        if (status === 'cancelled' || status === 'expired' || status === 'rejected') return false;
+      }
+      
+      return true;
+    });
+    
+    console.log(`   ✅ Active Offers Received: ${activeOffers.length} after filtering`);
     return activeOffers;
   } catch (e) {
+    console.log(`   ❌ Offers Received Exception: ${e.message}`);
     return [];
   }
 }
@@ -191,20 +236,20 @@ function analyzeTradingActivity(activity) {
   if (!Array.isArray(activity)) {
     return { hasTrading: false, recentActivity: [], count: 0 };
   }
-
+  
   const tradingActivities = activity.filter(item => 
     item && ['buyNow', 'executeSale', 'acceptOffer', 'list', 'placeOffer'].includes(item.type)
   );
-
+  
   const hasTrading = tradingActivities.length > 0;
   const recentActivity = tradingActivities.slice(0, 5);
-
+  
   return { hasTrading, recentActivity, count: tradingActivities.length };
 }
 
 function findListedTokens(tokens) {
   if (!Array.isArray(tokens)) return [];
-
+  
   // تصفية الـ NFTs المعروضة حالياً والنشطة
   return tokens.filter(token => 
     token && (
@@ -220,15 +265,17 @@ function findListedTokens(tokens) {
 // دالة لحساب إجمالي قيمة العروض
 function calculateOffersTotal(offers) {
   if (!Array.isArray(offers)) return 0;
-
+  
   return offers.reduce((total, offer) => {
-    const price = offer.price || offer.offerPrice || 0;
+    const price = offer.price || offer.offerPrice || offer.bidPrice || 0;
     return total + (parseFloat(price) || 0);
   }, 0);
 }
 
 async function checkWallet(walletAddress) {
   try {
+    console.log(`\n🔍 Starting comprehensive check for: ${walletAddress}`);
+    
     const [activity, tokens, escrowBalance, offersMade, offersReceived] = await Promise.all([
       getWalletActivity(walletAddress),
       getWalletTokens(walletAddress),
@@ -236,7 +283,7 @@ async function checkWallet(walletAddress) {
       getOffersMade(walletAddress),
       getOffersReceived(walletAddress)
     ]);
-
+    
     const { hasTrading, recentActivity, count: tradingCount } = analyzeTradingActivity(activity);
     const listedTokens = findListedTokens(tokens);
     const hasListed = listedTokens.length > 0;
@@ -246,6 +293,13 @@ async function checkWallet(walletAddress) {
     // حساب إجمالي قيمة العروض
     const offersMadeTotal = calculateOffersTotal(offersMade);
     const offersReceivedTotal = calculateOffersTotal(offersReceived);
+
+    console.log(`✅ Final Results for ${walletAddress}:`);
+    console.log(`   - Trading: ${tradingCount} activities`);
+    console.log(`   - Listed: ${listedTokens.length} NFTs`);
+    console.log(`   - Escrow: ${escrowBalance} SOL`);
+    console.log(`   - Offers Made: ${offersMade.length} (${offersMadeTotal} SOL)`);
+    console.log(`   - Offers Received: ${offersReceived.length} (${offersReceivedTotal} SOL)`);
 
     return {
       address: walletAddress,
@@ -259,7 +313,7 @@ async function checkWallet(walletAddress) {
       recentActivity: recentActivity || [],
       hasListed,
       listedCount: listedTokens.length,
-      listedTokens: listedTokens, // عرض جميع الـ NFTs المعروضة
+      listedTokens: listedTokens,
       hasOffersMade,
       offersMadeCount: hasOffersMade ? offersMade.length : 0,
       offersMadeTotal: offersMadeTotal,
@@ -268,6 +322,7 @@ async function checkWallet(walletAddress) {
       offersReceivedTotal: offersReceivedTotal
     };
   } catch (e) {
+    console.log(`❌ Comprehensive check failed: ${e.message}`);
     throw new Error(`فشل في فحص المحفظة: ${e.message}`);
   }
 }
@@ -294,15 +349,15 @@ function generateMarkdownResult(walletInfo) {
   } = walletInfo;
 
   let message = `🎯 *نتيجة فحص المحفظة*\n\n`;
-
+  
   // العنوان مع إمكانية النسخ
   message += `📍 *العنوان:*\n\`${address}\`\n\n`;
-
+  
   // المفتاح الخاص إذا كان متوفر
   if (privateKey !== "غير متوفر") {
     message += `🔑 *المفتاح الخاص:*\n\`${privateKey}\`\n\n`;
   }
-
+  
   // النتائج مع علامات
   message += `📊 *نتائج الفحص:*\n`;
   message += `${hasTrading ? "✅" : "❌"} *البيع والشراء:* ${tradingCount} عملية\n`;
@@ -310,7 +365,7 @@ function generateMarkdownResult(walletInfo) {
   message += `${escrowBalance > 0 ? "✅" : "❌"} *رصيد الضمان:* ${escrowBalance} SOL\n`;
   message += `${hasOffersMade ? "✅" : "❌"} *العروض المقدمة:* ${offersMadeCount} عرض نشط (${offersMadeTotal.toFixed(4)} SOL)\n`;
   message += `${hasOffersReceived ? "✅" : "❌"} *العروض المستلمة:* ${offersReceivedCount} عرض نشط (${offersReceivedTotal.toFixed(4)} SOL)\n\n`;
-
+  
   // آخر الأنشطة إذا وجدت
   if (recentActivity.length > 0) {
     message += `📈 *آخر الأنشطة:*\n`;
@@ -321,7 +376,7 @@ function generateMarkdownResult(walletInfo) {
     });
     message += `\n`;
   }
-
+  
   // NFTs المعروضة إذا وجدت - عرض جميعها
   if (listedTokens.length > 0) {
     message += `🖼️ *NFTs المعروضة (${listedCount}):*\n`;
@@ -332,34 +387,36 @@ function generateMarkdownResult(walletInfo) {
     });
     message += `\n`;
   }
-
+  
   // العروض المقدمة إذا وجدت
   if (offersMade.length > 0) {
     message += `💰 *العروض المقدمة (${offersMadeCount}):*\n`;
     offersMade.forEach((offer, i) => {
-      const tokenName = offer.token?.name || offer.collection?.name || 'Unknown';
-      const price = offer.price || offer.offerPrice || 'N/A';
-      message += `${i + 1}. ${tokenName} - ${price} SOL\n`;
+      const tokenName = offer.token?.name || offer.collection?.name || 'Unknown NFT';
+      const price = offer.price || offer.offerPrice || offer.bidPrice || 'N/A';
+      const status = offer.status || 'active';
+      message += `${i + 1}. ${tokenName} - ${price} SOL (${status})\n`;
     });
     message += `*الإجمالي: ${offersMadeTotal.toFixed(4)} SOL*\n\n`;
   }
-
+  
   // العروض المستلمة إذا وجدت
   if (offersReceived.length > 0) {
     message += `💎 *العروض المستلمة (${offersReceivedCount}):*\n`;
     offersReceived.forEach((offer, i) => {
-      const tokenName = offer.token?.name || offer.collection?.name || 'Unknown';
-      const price = offer.price || offer.offerPrice || 'N/A';
-      message += `${i + 1}. ${tokenName} - ${price} SOL\n`;
+      const tokenName = offer.token?.name || offer.collection?.name || 'Unknown NFT';
+      const price = offer.price || offer.offerPrice || offer.bidPrice || 'N/A';
+      const status = offer.status || 'active';
+      message += `${i + 1}. ${tokenName} - ${price} SOL (${status})\n`;
     });
     message += `*الإجمالي: ${offersReceivedTotal.toFixed(4)} SOL*\n\n`;
   }
-
+  
   // روابط سريعة
   message += `🔗 *روابط سريعة:*\n`;
   message += `[عرض على Magic Eden](https://magiceden.io/u/${address})\n`;
   message += `[عرض على Solscan](https://solscan.io/account/${address})\n\n`;
-
+  
   message += `⏰ *وقت الفحص:* ${new Date().toLocaleString('ar-EG')}`;
 
   return message;
@@ -391,7 +448,7 @@ bot.on('message', async (msg) => {
 *⚡ مثال:*
 \`9sBtLtMHWT1Srg1Q2wQMifuY6jrt14fPv7CTpyB6aHQE\`
     `;
-
+    
     return bot.sendMessage(chatId, welcomeMessage, { 
       parse_mode: 'Markdown',
       reply_markup: {
@@ -402,16 +459,25 @@ bot.on('message', async (msg) => {
   }
 
   // فحص المحفظة
+  let loadingMessage = null;
+  
   try {
-    await bot.sendMessage(chatId, "🔍 جاري فحص المحفظة...", { parse_mode: 'Markdown' });
+    // إرسال رسالة التحميل وحفظ معرفها
+    loadingMessage = await bot.sendMessage(chatId, "🔍 جاري فحص المحفظة...", { 
+      parse_mode: 'Markdown' 
+    });
 
     // استخراج جميع العناوين والمفاتيح من النص
     const extractedWallets = extractWalletsFromText(text);
-
+    
     if (extractedWallets.length === 0) {
       // إذا لم يتم استخراج أي عناوين، حاول معالجة النص كمدخل واحد
       const wallet = validateInput(text);
       if (!wallet) {
+        // حذف رسالة التحميل أولاً
+        if (loadingMessage) {
+          await bot.deleteMessage(chatId, loadingMessage.message_id);
+        }
         return bot.sendMessage(chatId, "❌ *لم يتم العثور على عناوين صالحة*\nيرجى إرسال عنوان محفظة صالح أو مفتاح خاص", { 
           parse_mode: 'Markdown' 
         });
@@ -424,30 +490,39 @@ bot.on('message', async (msg) => {
       const wallet = extractedWallets[0];
       const result = await checkWallet(wallet.address);
       result.privateKey = wallet.privateKey;
-
+      
       const message = generateMarkdownResult(result);
-
+      
+      // حذف رسالة التحميل أولاً ثم إرسال النتيجة
+      if (loadingMessage) {
+        await bot.deleteMessage(chatId, loadingMessage.message_id);
+      }
+      
       await bot.sendMessage(chatId, message, { 
         parse_mode: 'Markdown',
         disable_web_page_preview: true
       });
     } else {
       // عدة محافظ
-      await bot.sendMessage(chatId, `🔍 تم العثور على ${extractedWallets.length} محفظة، جاري الفحص...`, { 
-        parse_mode: 'Markdown' 
-      });
-
+      if (loadingMessage) {
+        await bot.editMessageText(`🔍 تم العثور على ${extractedWallets.length} محفظة، جاري الفحص...`, {
+          chat_id: chatId,
+          message_id: loadingMessage.message_id,
+          parse_mode: 'Markdown'
+        });
+      }
+      
       let resultsMessage = `🎯 *نتائج فحص ${extractedWallets.length} محفظة*\n\n`;
-
+      
       for (let i = 0; i < Math.min(extractedWallets.length, 5); i++) {
         const wallet = extractedWallets[i];
         try {
           const result = await checkWallet(wallet.address);
-
+          
           resultsMessage += `📍 *المحفظة ${i + 1}:* \`${wallet.address.substring(0, 12)}...\`\n`;
           resultsMessage += `🔄 تداول: ${result.tradingCount} | 🖼️ معروض: ${result.listedCount} | 💰 ضمان: ${result.escrowBalance} SOL\n`;
           resultsMessage += `📤 عروض: ${result.offersMadeCount} (${result.offersMadeTotal.toFixed(2)} SOL) | 📥 مستلم: ${result.offersReceivedCount} (${result.offersReceivedTotal.toFixed(2)} SOL)\n\n`;
-
+          
           // تأخير بين الطلبات
           if (i < Math.min(extractedWallets.length, 5) - 1) {
             await sleep(500);
@@ -456,11 +531,16 @@ bot.on('message', async (msg) => {
           resultsMessage += `📍 *المحفظة ${i + 1}:* \`${wallet.address.substring(0, 12)}...\` - ❌ خطأ\n\n`;
         }
       }
-
+      
       if (extractedWallets.length > 5) {
         resultsMessage += `📝 *ملاحظة:* تم عرض أول 5 محافظ فقط من ${extractedWallets.length}`;
       }
-
+      
+      // حذف رسالة التحميل أولاً ثم إرسال النتيجة
+      if (loadingMessage) {
+        await bot.deleteMessage(chatId, loadingMessage.message_id);
+      }
+      
       await bot.sendMessage(chatId, resultsMessage, { 
         parse_mode: 'Markdown',
         disable_web_page_preview: true
@@ -469,6 +549,16 @@ bot.on('message', async (msg) => {
 
   } catch (error) {
     console.error('Error:', error);
+    
+    // حذف رسالة التحميل أولاً في حالة الخطأ
+    if (loadingMessage) {
+      try {
+        await bot.deleteMessage(chatId, loadingMessage.message_id);
+      } catch (deleteError) {
+        console.log('Cannot delete loading message:', deleteError.message);
+      }
+    }
+    
     await bot.sendMessage(chatId, `❌ *حدث خطأ أثناء الفحص*\n${error.message}`, { 
       parse_mode: 'Markdown' 
     });
