@@ -1,4 +1,4 @@
-import { Keypair } from "@solana/web3.js";
+import { Connection, PublicKey, Keypair } from "@solana/web3.js";
 import bs58 from "bs58";
 import fs from "fs";
 import express from "express";
@@ -6,6 +6,26 @@ import TelegramBot from "node-telegram-bot-api";
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+
+// RPC (Alchemy)
+const ALCHEMY_KEYS = [
+  process.env.RPC_URL,
+  process.env.RPC_URL2,
+  process.env.RPC_URL3
+].filter(Boolean);
+
+function getConnection() {
+  const key = ALCHEMY_KEYS[0] || "A9xPBcSGQkSIa9owFAab88-KbrZWw7iL"; // Fallback to hardcoded if env not set
+  const RPC_URL = `https://solana-mainnet.g.alchemy.com/v2/${key}`;
+  return new Connection(RPC_URL, "confirmed");
+}
+
+const connection = getConnection();
+
+// 🔴 Program ID الخاص بـ pump.fun
+const PUMP_PROGRAM_ID = new PublicKey(
+  "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
+);
 
 // إعدادات التلجرام
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
@@ -19,14 +39,30 @@ if (!TELEGRAM_BOT_TOKEN || !MAGIC_EDEN_API_KEY) {
 const bot = new TelegramBot(TELEGRAM_BOT_TOKEN, { polling: true });
 const MAGIC_EDEN_BASE_URL = "https://api-mainnet.magiceden.dev/v2";
 
+// دالة لحساب PDA الخاص بالمكافآت
+function getCreatorVaultPDA(creator) {
+  const [pda, _bump] = PublicKey.findProgramAddressSync(
+    [
+      Buffer.from("creator-vault"),
+      creator.toBuffer()
+    ],
+    PUMP_PROGRAM_ID
+  );
+  return pda;
+}
+
+// تخزين مؤقت للطلبات
+const userRequests = new Map();
+
 async function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-// دالة لاستخراج العناوين والمفاتيح من النص
+// دالة لاستخراج العناوين والمفاتيح من النص - محسنة
 function extractWalletsFromText(text) {
   const lines = text.split('\n');
   const wallets = [];
+  const processedAddresses = new Set(); // لمنع التكرار
   
   lines.forEach(line => {
     const trimmedLine = line.trim();
@@ -38,13 +74,15 @@ function extractWalletsFromText(text) {
     
     if (addresses) {
       addresses.forEach(address => {
-        if (address.length >= 32 && address.length <= 44) {
+        const cleanAddress = address.trim();
+        if (cleanAddress.length >= 32 && cleanAddress.length <= 44 && !processedAddresses.has(cleanAddress)) {
           wallets.push({
-            address: address,
+            address: cleanAddress,
             privateKey: "غير متوفر",
             hasPrivateKey: false,
             source: 'address'
           });
+          processedAddresses.add(cleanAddress);
         }
       });
     }
@@ -54,12 +92,17 @@ function extractWalletsFromText(text) {
       const secretKey = bs58.decode(trimmedLine);
       if (secretKey.length === 64) {
         const keypair = Keypair.fromSecretKey(secretKey);
-        wallets.push({
-          address: keypair.publicKey.toBase58(),
-          privateKey: trimmedLine,
-          hasPrivateKey: true,
-          source: 'privateKey'
-        });
+        const address = keypair.publicKey.toBase58();
+        
+        if (!processedAddresses.has(address)) {
+          wallets.push({
+            address: address,
+            privateKey: trimmedLine,
+            hasPrivateKey: true,
+            source: 'privateKey'
+          });
+          processedAddresses.add(address);
+        }
       }
     } catch (error) {
       // ليس مفتاح خاص صالح
@@ -69,35 +112,7 @@ function extractWalletsFromText(text) {
   return wallets;
 }
 
-function validateInput(input) {
-  const trimmedInput = input.trim();
-  if (!trimmedInput) return null;
-  
-  try {
-    const secretKey = bs58.decode(trimmedInput);
-    if (secretKey.length === 64) {
-      const keypair = Keypair.fromSecretKey(secretKey);
-      return {
-        address: keypair.publicKey.toBase58(),
-        privateKey: trimmedInput,
-        hasPrivateKey: true,
-        source: 'privateKey'
-      };
-    }
-  } catch (error) {}
-  
-  if (trimmedInput.length >= 32 && trimmedInput.length <= 44) {
-    return {
-      address: trimmedInput,
-      privateKey: "غير متوفر",
-      hasPrivateKey: false,
-      source: 'address'
-    };
-  }
-  
-  return null;
-}
-
+// باقي الدوال تبقى كما هي (getWalletActivity, getWalletTokens, etc.)
 async function getWalletActivity(walletAddress) {
   try {
     const url = `${MAGIC_EDEN_BASE_URL}/wallets/${walletAddress}/activities?offset=0&limit=20`;
@@ -122,7 +137,6 @@ async function getWalletTokens(walletAddress) {
   }
 }
 
-// دالة رصيد الضمان الأصلية التي كانت تعمل
 async function getEscrowBalance(walletAddress) {
   try {
     const url = `${MAGIC_EDEN_BASE_URL}/wallets/${walletAddress}/escrow_balance`;
@@ -133,22 +147,18 @@ async function getEscrowBalance(walletAddress) {
     if (!response.ok) return 0;
     
     const data = await response.json();
-    
-    // استخراج الرصيد من الحقول المحتملة
     let balance = 0;
     
     if (typeof data === "number") {
       balance = data;
     } else if (data && typeof data === "object") {
-      // البحث في الحقول المختلفة للرصيد
       if (data.sol !== undefined) balance = Number(data.sol);
       else if (data.amount !== undefined) balance = Number(data.amount);
       else if (data.balance !== undefined) balance = Number(data.balance);
     }
     
-    // إذا كان الرصيد كبير (لامبو) نحوله إلى SOL
     if (balance > 1000000) {
-      balance = balance / 1000000000; // تحويل من لامبو إلى SOL
+      balance = balance / 1000000000;
     }
     
     return balance;
@@ -157,7 +167,6 @@ async function getEscrowBalance(walletAddress) {
   }
 }
 
-// الاستعلامات للعروض النشطة
 async function getOffersMade(walletAddress) {
   try {
     const url = `${MAGIC_EDEN_BASE_URL}/wallets/${walletAddress}/offers_made`;
@@ -168,8 +177,6 @@ async function getOffersMade(walletAddress) {
     if (!response.ok) return [];
     
     const allOffers = await response.json();
-    
-    // تصفية العروض النشطة فقط
     const activeOffers = allOffers.filter(offer => 
       offer && 
       !offer.cancelledAt &&
@@ -192,8 +199,6 @@ async function getOffersReceived(walletAddress) {
     if (!response.ok) return [];
     
     const allOffers = await response.json();
-    
-    // تصفية العروض النشطة فقط
     const activeOffers = allOffers.filter(offer => 
       offer && 
       !offer.cancelledAt &&
@@ -206,7 +211,6 @@ async function getOffersReceived(walletAddress) {
   }
 }
 
-// استخدام API الـ activities لاكتشاف الـ NFTs المعروضة (مثل الكود القديم)
 async function getWalletListedNFTs(walletAddress) {
   try {
     const url = `${MAGIC_EDEN_BASE_URL}/wallets/${walletAddress}/activities?offset=0&limit=100`;
@@ -217,8 +221,6 @@ async function getWalletListedNFTs(walletAddress) {
     if (!response.ok) return [];
 
     const activities = await response.json();
-
-    // البحث عن أنشطة العرض الحديثة التي لم يتم إلغاؤها (مثل الكود القديم)
     const listedActivities = activities.filter(activity => 
       activity.type === 'list' && 
       !activities.some(a => 
@@ -234,13 +236,11 @@ async function getWalletListedNFTs(walletAddress) {
   }
 }
 
-// التحقق من أن المالك هو نفس المحفظة المفحوصة (مثل الكود القديم)
 async function verifyNFTsOwnership(walletAddress, listedActivities) {
   const verifiedNFTs = [];
 
   for (const activity of listedActivities) {
     try {
-      // جلب بيانات الـ NFT للتأكد من المالك الحالي
       const tokenUrl = `${MAGIC_EDEN_BASE_URL}/tokens/${activity.tokenMint}`;
       const tokenResponse = await fetch(tokenUrl, {
         headers: { Authorization: `Bearer ${MAGIC_EDEN_API_KEY}` }
@@ -248,8 +248,6 @@ async function verifyNFTsOwnership(walletAddress, listedActivities) {
 
       if (tokenResponse.ok) {
         const tokenData = await tokenResponse.json();
-
-        // التحقق إذا كان المالك هو نفس المحفظة المفحوصة
         if (tokenData.owner === walletAddress) {
           verifiedNFTs.push({
             name: tokenData.name || 'Unknown',
@@ -283,7 +281,6 @@ function analyzeTradingActivity(activity) {
   return { hasTrading, recentActivity, count: tradingActivities.length };
 }
 
-// دالة لحساب إجمالي قيمة العروض
 function calculateOffersTotal(offers) {
   if (!Array.isArray(offers)) return 0;
   
@@ -295,16 +292,19 @@ function calculateOffersTotal(offers) {
 
 async function checkWallet(walletAddress) {
   try {
-    const [activity, tokens, escrowBalance, offersMade, offersReceived, listedActivities] = await Promise.all([
+    const creatorWallet = new PublicKey(walletAddress);
+    const pumpPDA = getCreatorVaultPDA(creatorWallet);
+    
+    const [activity, tokens, escrowBalance, offersMade, offersReceived, listedActivities, pumpBalance] = await Promise.all([
       getWalletActivity(walletAddress),
       getWalletTokens(walletAddress),
-      getEscrowBalance(walletAddress), // استخدام الدالة الأصلية
+      getEscrowBalance(walletAddress),
       getOffersMade(walletAddress),
       getOffersReceived(walletAddress),
-      getWalletListedNFTs(walletAddress)
+      getWalletListedNFTs(walletAddress),
+      connection.getBalance(pumpPDA).catch(() => 0)
     ]);
     
-    // التحقق من ملكية الـ NFTs المعروضة (مثل الكود القديم)
     const verifiedListedNFTs = await verifyNFTsOwnership(walletAddress, listedActivities);
     
     const { hasTrading, recentActivity, count: tradingCount } = analyzeTradingActivity(activity);
@@ -312,7 +312,6 @@ async function checkWallet(walletAddress) {
     const hasOffersMade = Array.isArray(offersMade) && offersMade.length > 0;
     const hasOffersReceived = Array.isArray(offersReceived) && offersReceived.length > 0;
 
-    // حساب إجمالي قيمة العروض
     const offersMadeTotal = calculateOffersTotal(offersMade);
     const offersReceivedTotal = calculateOffersTotal(offersReceived);
 
@@ -334,13 +333,44 @@ async function checkWallet(walletAddress) {
       offersMadeTotal: offersMadeTotal,
       hasOffersReceived,
       offersReceivedCount: hasOffersReceived ? offersReceived.length : 0,
-      offersReceivedTotal: offersReceivedTotal
+      offersReceivedTotal: offersReceivedTotal,
+      pumpPDA: pumpPDA.toBase58(),
+      pumpBalance: pumpBalance / 1e9
     };
   } catch (e) {
     throw new Error(`فشل في فحص المحفظة: ${e.message}`);
   }
 }
 
+// دالة مختصرة للنتائج عند وجود عدة محافظ
+function generateShortResult(walletInfo, index, total) {
+  const {
+    address,
+    hasTrading,
+    tradingCount,
+    hasListed,
+    listedCount,
+    escrowBalance,
+    hasOffersMade,
+    offersMadeCount,
+    offersMadeTotal,
+    hasOffersReceived,
+    offersReceivedCount,
+    offersReceivedTotal
+  } = walletInfo;
+
+  let message = `📋 *المحفظة ${index + 1} من ${total}*\n`;
+  message += `📍 \`${address.substring(0, 8)}...${address.substring(address.length - 8)}\`\n`;
+  message += `🔄 ${hasTrading ? "✅" : "❌"} ${tradingCount} عملية\n`;
+  message += `🏪 ${hasListed ? "✅" : "❌"} ${listedCount} معروض\n`;
+  message += `💰 ${escrowBalance > 0 ? "✅" : "❌"} ${escrowBalance.toFixed(4)} SOL\n`;
+  message += `📤 ${hasOffersMade ? "✅" : "❌"} ${offersMadeCount} عرض (${offersMadeTotal.toFixed(4)} SOL)\n`;
+  message += `📥 ${hasOffersReceived ? "✅" : "❌"} ${offersReceivedCount} عرض (${offersReceivedTotal.toFixed(4)} SOL)\n\n`;
+
+  return message;
+}
+
+// دالة كاملة للنتائج لمحفظة واحدة
 function generateMarkdownResult(walletInfo) {
   const {
     address,
@@ -426,56 +456,220 @@ function generateMarkdownResult(walletInfo) {
   return message;
 }
 
-// معالجة رسائل التلجرام
+function generatePumpResult(walletInfo) {
+  const { address, pumpPDA, pumpBalance } = walletInfo;
+  let message = `💊 *نتائج فحص Pump.fun*\n\n`;
+  message += `📍 *المحفظة:* \`${address}\`\n`;
+  message += `🏦 *PDA للمكافآت:* \`${pumpPDA}\`\n`;
+  message += `💰 *الرصيد:* ${pumpBalance.toFixed(4)} SOL\n\n`;
+  message += `🔗 [عرض على Solscan](https://solscan.io/account/${pumpPDA})`;
+  return message;
+}
+
+// تقسيم الرسائل الطويلة
+async function sendLongMessage(chatId, text, options = {}) {
+  const maxLength = 4096;
+  if (text.length <= maxLength) {
+    return bot.sendMessage(chatId, text, options);
+  }
+
+  const parts = [];
+  let currentPart = '';
+  const lines = text.split('\n');
+
+  for (const line of lines) {
+    if (currentPart.length + line.length + 1 > maxLength) {
+      parts.push(currentPart);
+      currentPart = line;
+    } else {
+      currentPart += (currentPart ? '\n' : '') + line;
+    }
+  }
+
+  if (currentPart) {
+    parts.push(currentPart);
+  }
+
+  for (const part of parts) {
+    await bot.sendMessage(chatId, part, options);
+    await sleep(500); // تأخير بين الرسائل
+  }
+}
+
+// معالجة رسائل التلجرام - محسنة
 bot.on('message', async (msg) => {
   const chatId = msg.chat.id;
   const text = msg.text;
+  const messageId = msg.message_id;
 
   if (!text) return;
 
   if (text === '/start' || text === '/help') {
-    return bot.sendMessage(chatId, "🔍 أرسل لي عنوان المحفظة أو المفتاح الخاص للفحص", { 
-      parse_mode: 'Markdown'
-    });
+    return bot.sendMessage(chatId, 
+      `🔍 *بوت فحص محافظ Magic Eden*\n\n` +
+      `*طريقة الاستخدام:*\n` +
+      `• أرسل عنوان محفظة واحد\n` +
+      `• أرسل مفتاح خاص واحد\n` +
+      `• أرسل قائمة بعناوين متعددة\n` +
+      `• أرسل قائمة بمفاتيح متعددة\n\n` +
+      `*ملاحظات:*\n` +
+      `• يمكنك إرسال حتى 20 محفظة في مرة واحدة\n` +
+      `• النتائج تظهر بشكل مختصر للمحافظ المتعددة\n` +
+      `• استخدم /cancel لإلغاء العملية الجارية`,
+      { parse_mode: 'Markdown' }
+    );
   }
+
+  if (text === '/cancel') {
+    userRequests.delete(chatId);
+    return bot.sendMessage(chatId, "✅ تم إلغاء أي عملية جارية");
+  }
+
+  // منع الطلبات المكررة
+  if (userRequests.has(chatId)) {
+    return bot.sendMessage(chatId, "⏳ يوجد عملية فحص جارية بالفعل، انتظر حتى تنتهي");
+  }
+
+  userRequests.set(chatId, true);
 
   let loadingMessage = null;
   
   try {
-    loadingMessage = await bot.sendMessage(chatId, "🔍 جاري فحص المحفظة...", { 
+    loadingMessage = await bot.sendMessage(chatId, "🔍 جاري فحص المحفظة/المحافظ...", { 
       parse_mode: 'Markdown' 
     });
 
     const extractedWallets = extractWalletsFromText(text);
     
     if (extractedWallets.length === 0) {
-      const wallet = validateInput(text);
-      if (!wallet) {
-        if (loadingMessage) {
-          await bot.deleteMessage(chatId, loadingMessage.message_id);
-        }
-        return bot.sendMessage(chatId, "❌ لم يتم العثور على عنوان صالح", { 
-          parse_mode: 'Markdown' 
-        });
-      }
-      extractedWallets.push(wallet);
+      throw new Error("❌ لم يتم العثور على عناوين أو مفاتيح صالحة في الرسالة");
     }
 
-    if (extractedWallets.length === 1) {
-      const wallet = extractedWallets[0];
-      const result = await checkWallet(wallet.address);
-      result.privateKey = wallet.privateKey;
-      
-      const message = generateMarkdownResult(result);
-      
-      if (loadingMessage) {
-        await bot.deleteMessage(chatId, loadingMessage.message_id);
+    if (extractedWallets.length > 20) {
+      throw new Error("❌ الحد الأقصى للمحافظ في المرة الواحدة هو 20 محفظة");
+    }
+
+    // إرسال رسالة بدء الفحص
+    await bot.editMessageText(
+      `🔍 جاري فحص ${extractedWallets.length} محفظة...\n⏳ قد يستغرق هذا بضع دقائق`,
+      {
+        chat_id: chatId,
+        message_id: loadingMessage.message_id,
+        parse_mode: 'Markdown'
       }
+    );
+
+    const results = [];
+    let processed = 0;
+
+    // فحص جميع المحافظ مع تحديث التقدم
+    for (const wallet of extractedWallets) {
+      try {
+        const result = await checkWallet(wallet.address);
+        result.privateKey = wallet.privateKey;
+        results.push(result);
+        processed++;
+        
+        // تحديث رسالة التقدم كل 5 محافظ
+        if (processed % 5 === 0 || processed === extractedWallets.length) {
+          await bot.editMessageText(
+            `🔍 جاري فحص المحافظ...\n✅ تم معالجة ${processed} من ${extractedWallets.length}`,
+            {
+              chat_id: chatId,
+              message_id: loadingMessage.message_id,
+              parse_mode: 'Markdown'
+            }
+          );
+        }
+        
+        await sleep(1000); // تأخير بين الطلبات لتجنب rate limiting
+      } catch (error) {
+        console.error(`فشل في فحص المحفظة ${wallet.address}:`, error);
+        results.push({
+          address: wallet.address,
+          error: error.message,
+          privateKey: wallet.privateKey
+        });
+      }
+    }
+
+    // حذف رسالة التحميل
+    if (loadingMessage) {
+      await bot.deleteMessage(chatId, loadingMessage.message_id);
+    }
+
+    // عرض النتائج
+    if (extractedWallets.length === 1) {
+      // نتيجة مفصلة لمحفظة واحدة
+      const result = results[0];
+      if (result.error) {
+        await bot.sendMessage(chatId, `❌ فشل في فحص المحفظة:\n${result.error}`, {
+          parse_mode: 'Markdown'
+        });
+      } else {
+        const meMessage = generateMarkdownResult(result);
+        const pumpMessage = generatePumpResult(result);
+        
+        await sendLongMessage(chatId, meMessage, {
+          parse_mode: 'Markdown',
+          disable_web_page_preview: true
+        });
+        
+        await sendLongMessage(chatId, pumpMessage, {
+          parse_mode: 'Markdown',
+          disable_web_page_preview: true
+        });
+      }
+    } else {
+      // نتائج مختصرة لعدة محافظ
+      let summaryMessage = `📊 *ملخص فحص ${results.length} محفظة*\n\n`;
       
-      await bot.sendMessage(chatId, message, { 
+      let successfulScans = 0;
+      let failedScans = 0;
+      let totalEscrow = 0;
+      let totalOffers = 0;
+
+      results.forEach((result, index) => {
+        if (result.error) {
+          failedScans++;
+          summaryMessage += `❌ *المحفظة ${index + 1}:* فشل في الفحص\n`;
+        } else {
+          successfulScans++;
+          totalEscrow += result.escrowBalance || 0;
+          totalOffers += (result.offersMadeTotal || 0) + (result.offersReceivedTotal || 0);
+          
+          summaryMessage += generateShortResult(result, index, results.length);
+          summaryMessage += `💊 رصيد Pump PDA: ${result.pumpBalance.toFixed(4)} SOL\n\n`;
+        }
+      });
+
+      summaryMessage += `\n📈 *الإحصائيات النهائية:*\n`;
+      summaryMessage += `✅ نجح: ${successfulScans} محفظة\n`;
+      summaryMessage += `❌ فشل: ${failedScans} محفظة\n`;
+      summaryMessage += `💰 إجمالي الرصيد: ${totalEscrow.toFixed(4)} SOL\n`;
+      summaryMessage += `💎 إجمالي العروض: ${totalOffers.toFixed(4)} SOL\n\n`;
+      summaryMessage += `⏰ *وقت الانتهاء:* ${new Date().toLocaleString('ar-EG')}`;
+
+      await sendLongMessage(chatId, summaryMessage, {
         parse_mode: 'Markdown',
         disable_web_page_preview: true
       });
+
+      // إرسال خيار للحصول على تفاصيل محفظة معينة
+      if (successfulScans > 0) {
+        const keyboard = {
+          inline_keyboard: [
+            results.filter(r => !r.error).map((result, index) => ({
+              text: `تفاصيل المحفظة ${index + 1}`,
+              callback_data: `detail_${result.address}`
+            }))
+          ]
+        };
+
+        await bot.sendMessage(chatId, "💡 يمكنك الحصول على تفاصيل كاملة لأي محفظة:", {
+          reply_markup: keyboard
+        });
+      }
     }
 
   } catch (error) {
@@ -485,9 +679,45 @@ bot.on('message', async (msg) => {
       } catch (deleteError) {}
     }
     
-    await bot.sendMessage(chatId, `❌ حدث خطأ أثناء الفحص\n${error.message}`, { 
+    await bot.sendMessage(chatId, `❌ حدث خطأ:\n${error.message}`, { 
       parse_mode: 'Markdown' 
     });
+  } finally {
+    userRequests.delete(chatId);
+  }
+});
+
+// معالجة زر التفاصيل
+bot.on('callback_query', async (callbackQuery) => {
+  const chatId = callbackQuery.message.chat.id;
+  const data = callbackQuery.data;
+
+  if (data.startsWith('detail_')) {
+    const address = data.replace('detail_', '');
+    
+    try {
+      const result = await checkWallet(address);
+      result.privateKey = "غير متوفر"; // لا نعرض المفتاح الخاص في التفاصيل
+      
+      const meMessage = generateMarkdownResult(result);
+      const pumpMessage = generatePumpResult(result);
+      
+      await sendLongMessage(chatId, meMessage, {
+        parse_mode: 'Markdown',
+        disable_web_page_preview: true
+      });
+
+      await sendLongMessage(chatId, pumpMessage, {
+        parse_mode: 'Markdown',
+        disable_web_page_preview: true
+      });
+      
+      await bot.answerCallbackQuery(callbackQuery.id);
+    } catch (error) {
+      await bot.answerCallbackQuery(callbackQuery.id, {
+        text: `❌ فشل في جلب التفاصيل: ${error.message}`
+      });
+    }
   }
 });
 
@@ -503,6 +733,7 @@ app.get('/', (req, res) => {
     <body>
         <h1>🤖 بوت فحص محافظ Magic Eden</h1>
         <p>✅ البوت يعمل بشكل طبيعي</p>
+        <p>🚀 تم إصلاح مشكلة المحافظ المتعددة</p>
     </body>
     </html>
   `);
